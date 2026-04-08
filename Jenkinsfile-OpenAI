@@ -1,0 +1,158 @@
+import groovy.json.JsonOutput
+
+def promptText = '''
+You are analyzing a Jenkins console log.
+
+Your job is to:
+1. Identify the most likely root cause of the failure
+2. Ignore unrelated noise when possible
+3. Highlight only the most relevant log lines
+4. Suggest 3 to 5 practical next steps
+
+Rules:
+- Be concise and direct
+- Only suggest fixes supported by the log
+- If a suggestion is less certain, label it as "Possible additional check"
+- Prefer actionable steps over explanations
+
+Output format:
+
+Summary:
+<one or two sentences>
+
+Likely Cause:
+<most likely cause>
+
+Relevant Log Lines:
+- <line 1>
+- <line 2>
+
+Suggested Fixes:
+1. <fix 1>
+2. <fix 2>
+3. <fix 3>
+'''.stripIndent().trim()
+
+def buildFailed = false
+
+pipeline {
+    agent any
+
+    stages {
+        stage('Setup') {
+            steps {
+                sh 'echo "Initializing environment..."'
+                sh 'sleep 1'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    def status = sh(
+                        script: '''
+                            bash -c '
+                              set +e
+                              {
+                                echo "Resolving dependencies..."
+                                sleep 1
+                                echo "WARNING: deprecated package detected"
+                                sleep 1
+                                echo "ERROR: Failed to resolve dependency foo-bar:1.2.3"
+                                exit 1
+                              } 2>&1 | tee build.log
+                              exit ${PIPESTATUS[0]}
+                            '
+                        ''',
+                        returnStatus: true
+                    )
+
+                    echo "Captured build status: ${status}"
+
+                    if (status != 0) {
+                        buildFailed = true
+                        currentBuild.result = 'FAILURE'
+                    }
+                }
+            }
+        }
+
+        stage('Analyze Failure with OpenAI') {
+            when {
+                expression { buildFailed }
+            }
+            steps {
+                script {
+                    def logText = readFile('build.log')
+                    def userPrompt = "${promptText}\n\nHere is the Jenkins log:\n\n${logText}"
+
+                    def payload = [
+                        model: 'gpt-4.1',
+                        input: [
+                            [
+                                role: 'user',
+                                content: [
+                                    [
+                                        type: 'input_text',
+                                        text: userPrompt
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ]
+
+                    writeFile(
+                        file: 'openai_request.json',
+                        text: JsonOutput.prettyPrint(JsonOutput.toJson(payload))
+                    )
+
+                    withCredentials([string(credentialsId: 'openai-api-key', variable: 'OPENAI_API_KEY')]) {
+                        sh '''
+                            http_code=$(curl -sS https://api.openai.com/v1/responses \
+                              -H "Content-Type: application/json" \
+                              -H "Authorization: Bearer $OPENAI_API_KEY" \
+                              -d @openai_request.json \
+                              -o openai_response.json \
+                              -w "%{http_code}")
+
+                            echo "OpenAI HTTP status: $http_code"
+                            echo "===== AI LOG ANALYSIS (OPENAI) ====="
+
+                            python3 - <<'PY'
+import json
+
+with open("openai_response.json", "r") as f:
+    data = json.load(f)
+
+parts = []
+for item in data.get("output", []):
+    for content in item.get("content", []):
+        if content.get("type") == "output_text" and content.get("text"):
+            parts.append(content["text"])
+
+print("\\n".join(parts) if parts else "No analysis text returned from OpenAI.")
+PY
+
+                            echo "===== END AI LOG ANALYSIS (OPENAI) ====="
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Post') {
+            when {
+                expression { !buildFailed }
+            }
+            steps {
+                sh 'echo "This should not run if the build failed"'
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Finished with result: ${currentBuild.currentResult}"
+        }
+    }
+}
