@@ -3,7 +3,7 @@
 ## The Problem
 When a Jenkins build fails, the information you need is usually already there. It’s just buried.
 
-Let’s dig that out.
+## Let’s dig that out.
 
 By the end of this guide, you will have:
 * a Jenkins job that fails in a controlled way
