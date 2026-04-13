@@ -46,6 +46,7 @@ pipeline {
             }
         }
 
+        /* faking log output for this exercise */
         stage('Build') {
             steps {
                 script {
@@ -102,6 +103,9 @@ pipeline {
                         text: JsonOutput.prettyPrint(JsonOutput.toJson(payload))
                     )
 
+                    /*
+                     * there are slight differences between the API call to Anthropic and OpenAI
+                     */
                     withCredentials([string(credentialsId: 'anthropic-api-key', variable: 'ANTHROPIC_API_KEY')]) {
                         sh '''
                             http_code=$(curl -sS https://api.anthropic.com/v1/messages \
@@ -114,7 +118,8 @@ pipeline {
 
                             echo "Anthropic HTTP status: $http_code"
                             echo "===== AI LOG ANALYSIS (CLAUDE) ====="
-
+                            
+                            # call Python
                             python3 - <<'PY'
 import json
 
